@@ -1,0 +1,42 @@
+# Local Postgres with pgvector, for development.
+#
+# The `pgvector/pgvector` image is plain Postgres with the extension compiled
+# in, which is the whole reason to use it over `postgres:17`: the schema
+# declares `vector(1536)`, so a database without the extension cannot even run
+# the initial migration.
+#
+# Production is a managed Postgres behind a connection pooler, which is why the
+# app keeps DATABASE_URL and DIRECT_URL separate. Locally there is no pooler
+# and both point here — see .env.example.
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg17
+    container_name: voice-orb-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: voice_orb
+      # Deterministic collation, so ORDER BY on text behaves the same here as
+      # on the managed instance.
+      POSTGRES_INITDB_ARGS: "--locale=C --encoding=UTF8"
+    ports:
+      # 5433 on the host: 5432 is usually taken by a local Postgres install,
+      # and a port collision here surfaces as a confusing auth error rather
+      # than a bind failure.
+      - "5433:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      # `prisma migrate` against a server still running its init scripts fails
+      # in ways that look like a schema problem, so nothing should start until
+      # this passes.
+      test: ["CMD-SHELL", "pg_isready -U postgres -d voice_orb"]
+      interval: 3s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+
+volumes:
+  postgres-data:

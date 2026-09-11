@@ -1,0 +1,68 @@
+Knowledge base source content. Ingest with:
+
+  npm run kb:ingest -- ./knowledge
+
+═══ WHAT IS ACCEPTED ═══
+
+  .md  .markdown  .mdx   treated as Markdown
+  .txt                   treated as plain text
+
+Everything else is ignored, silently. Subdirectories are walked. Dotfiles are
+skipped, which is why this file is not itself indexed. Files must be UTF-8.
+
+NOT yet supported: PDF, DOCX, website URLs, FAQ imports, database sources.
+The schema has room for all of them (DocumentSourceType) but no parser exists
+yet — that is slice 6b.
+
+A document's title is its path relative to this directory, so
+`policies/refunds.md` is titled "policies/refunds.md" and that string is what
+appears in the citation panel. Name files the way you want them cited.
+
+═══ HOW TO STRUCTURE IT ═══
+
+These are not style preferences. Each one changes what the assistant retrieves.
+
+1. USE `#` AND `##` HEADINGS, AND MAKE THEM TOPICS.
+   A heading starts a new chunk, and its text is stored with that chunk and
+   shown in citations. Sections are the strongest signal about what belongs
+   together. Underline-style headings (===, ---) are NOT detected — only `#`.
+
+2. ONE TOPIC PER SECTION.
+   Retrieval usually returns a single passage. An answer spread across two
+   sections may only half-arrive.
+
+3. WRITE EACH SECTION SO IT STANDS ALONE.
+   The model sees the retrieved passage, not the document around it. "It is 50
+   pesos per hour" is useless out of context; "Parking is 50 pesos per hour
+   after the first two hours" is not. Repeating the subject is good here, even
+   where it reads as redundant in the full document.
+
+4. SEPARATE PARAGRAPHS WITH BLANK LINES.
+   Blank lines are the chunk boundary. A wall of text with no blank lines gets
+   split on sentence boundaries instead, which is worse.
+
+5. KEEP SECTIONS ROUGHLY 100-1200 CHARACTERS.
+   Above ~1800 a section is split. Very short passages are merged into the
+   preceding section rather than dropped, so a one-line fact is fine — it just
+   rides along with its neighbours.
+
+6. WRITE IN ENGLISH.
+   Visitors speak Taglish and Bisaya; the assistant translates their question
+   into English keywords before searching. The embedding model is multilingual
+   so a Tagalog document will still work, but English is the tested path.
+
+7. STATE FACTS PLAINLY. NO MARKETING.
+   "Open 8am to 5pm, Monday to Friday" retrieves. "We're here when you need
+   us!" does not, and the assistant is forbidden from inventing the hours.
+
+═══ TWO THINGS TO KNOW ═══
+
+Anything indexed here is readable in bulk through /api/knowledge/search, which
+is public and unauthenticated until slice 7. Do not index anything that should
+not be public.
+
+Whatever is not in here, the assistant will say it does not know. That is the
+designed behaviour, not a bug — it will not fill gaps from its own knowledge.
+
+Ingestion is idempotent on a SHA-256 of file contents: unchanged files are
+skipped, changed files have their chunks replaced wholesale. Re-run it freely.

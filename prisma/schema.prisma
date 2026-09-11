@@ -1,0 +1,355 @@
+// Voice Orb — data model.
+// Prisma 7: the datasource block carries no `url`; the CLI reads it from
+// prisma.config.ts, and the runtime reads it from the driver adapter.
+
+generator client {
+  provider = "prisma-client"
+  output   = "../generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ─── Enums ──────────────────────────────────────────────────────────────────
+
+enum ConversationStatus {
+  ACTIVE
+  COMPLETED
+  ABANDONED
+  FAILED
+}
+
+enum MessageRole {
+  USER
+  ASSISTANT
+  SYSTEM
+  TOOL
+}
+
+enum DocumentSourceType {
+  PDF
+  DOCX
+  TXT
+  MARKDOWN
+  URL
+  FAQ
+  DATABASE
+}
+
+enum DocumentStatus {
+  PENDING
+  PROCESSING
+  INDEXED
+  FAILED
+}
+
+// ─── Auth (Better Auth core schema; field names are fixed by the adapter) ───
+
+model User {
+  id               String   @id @default(cuid(2))
+  name             String
+  email            String   @unique
+  emailVerified    Boolean  @default(false)
+  image            String?
+  role             String   @default("admin")
+  twoFactorEnabled Boolean  @default(false)
+  createdAt        DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt        DateTime @updatedAt @db.Timestamptz(6)
+
+  sessions  Session[]
+  accounts  Account[]
+  auditLogs AuditLog[]
+  prompts   Prompt[]
+
+  @@map("user")
+}
+
+model Session {
+  id        String   @id @default(cuid(2))
+  token     String   @unique
+  expiresAt DateTime @db.Timestamptz(6)
+  ipAddress String?
+  userAgent String?
+  userId    String
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @db.Timestamptz(6)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("session")
+}
+
+model Account {
+  id                    String    @id @default(cuid(2))
+  accountId             String
+  providerId            String
+  userId                String
+  accessToken           String?
+  refreshToken          String?
+  idToken               String?
+  accessTokenExpiresAt  DateTime? @db.Timestamptz(6)
+  refreshTokenExpiresAt DateTime? @db.Timestamptz(6)
+  scope                 String?
+  password              String?
+  createdAt             DateTime  @default(now()) @db.Timestamptz(6)
+  updatedAt             DateTime  @updatedAt @db.Timestamptz(6)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([providerId, accountId])
+  @@index([userId])
+  @@map("account")
+}
+
+model Verification {
+  id         String   @id @default(cuid(2))
+  identifier String
+  value      String
+  expiresAt  DateTime @db.Timestamptz(6)
+  createdAt  DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt  DateTime @updatedAt @db.Timestamptz(6)
+
+  @@index([identifier])
+  @@map("verification")
+}
+
+// ─── Conversation ───────────────────────────────────────────────────────────
+
+model Conversation {
+  id     String             @id @default(cuid(2))
+  status ConversationStatus @default(ACTIVE)
+
+  // Visitors are anonymous. The raw IP is never stored — only a keyed hash,
+  // used for per-IP rate limiting and concurrent-session caps.
+  ipHash    String
+  userAgent String?
+
+  startedAt DateTime  @default(now()) @db.Timestamptz(6)
+  endedAt   DateTime? @db.Timestamptz(6)
+
+  realtimeModel String
+  voice         String
+
+  // Audio and text tokens bill at very different rates, so they are counted
+  // separately rather than summed.
+  audioInputTokens  Int     @default(0)
+  audioOutputTokens Int     @default(0)
+  textInputTokens   Int     @default(0)
+  textOutputTokens  Int     @default(0)
+  cachedInputTokens Int     @default(0)
+  estimatedCostUsd  Decimal @default(0) @db.Decimal(10, 6)
+
+  firstAudioLatencyMs Int?
+  turnCount           Int  @default(0)
+  interruptionCount   Int  @default(0)
+
+  messages  Message[]
+  analytics Analytics[]
+
+  @@index([startedAt])
+  @@index([status, startedAt])
+  @@index([ipHash, startedAt])
+  @@map("conversation")
+}
+
+model Message {
+  id             String @id @default(cuid(2))
+  conversationId String
+
+  role MessageRole
+  // Append-only ordering. The client patches the last message by id while
+  // streaming; `sequence` is what the transcript sorts on.
+  sequence Int
+  content  String @db.Text
+
+  // Set when the user barges in mid-utterance. The transcript must show the
+  // assistant's turn as cut off, not as though it finished speaking.
+  truncated Boolean @default(false)
+
+  latencyMs Int?
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+
+  conversation Conversation    @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  sources      MessageSource[]
+
+  @@unique([conversationId, sequence])
+  @@index([conversationId, createdAt])
+  @@map("message")
+}
+
+/// Which retrieved chunks grounded a given assistant turn. Rendered in the
+/// chat panel, never spoken. Also the raw material for retrieval-quality
+/// analysis once real traffic exists.
+model MessageSource {
+  id        String @id @default(cuid(2))
+  messageId String
+  chunkId   String
+  score     Float
+  rank      Int
+
+  message Message       @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  chunk   DocumentChunk @relation(fields: [chunkId], references: [id], onDelete: Cascade)
+
+  @@unique([messageId, chunkId])
+  @@index([chunkId])
+  @@map("message_source")
+}
+
+// ─── Knowledge base ─────────────────────────────────────────────────────────
+
+model KnowledgeBase {
+  id          String  @id @default(cuid(2))
+  slug        String  @unique
+  name        String
+  description String?
+  isActive    Boolean @default(true)
+
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @db.Timestamptz(6)
+
+  documents Document[]
+
+  @@map("knowledge_base")
+}
+
+model Document {
+  id              String @id @default(cuid(2))
+  knowledgeBaseId String
+
+  title      String
+  sourceType DocumentSourceType
+  status     DocumentStatus     @default(PENDING)
+
+  // Populated for URL sources; the crawl scope boundary lives on the job,
+  // but per-document provenance lives here.
+  sourceUrl String?
+  // Supabase Storage object path for uploaded files. Served via signed URLs.
+  storagePath String?
+  mimeType    String?
+  byteSize    Int?
+  // Content hash, so a re-crawl that returns identical bytes skips re-embedding.
+  checksum    String?
+
+  chunkCount    Int       @default(0)
+  fetchedAt     DateTime? @db.Timestamptz(6)
+  lastIndexedAt DateTime? @db.Timestamptz(6)
+  error         String?   @db.Text
+
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @db.Timestamptz(6)
+
+  knowledgeBase KnowledgeBase   @relation(fields: [knowledgeBaseId], references: [id], onDelete: Cascade)
+  chunks        DocumentChunk[]
+
+  @@unique([knowledgeBaseId, sourceUrl])
+  @@index([knowledgeBaseId, status])
+  @@index([lastIndexedAt])
+  @@map("document")
+}
+
+/// One embedded passage. `embedding` is pgvector's `vector` type, which Prisma
+/// has no native mapping for — it is declared Unsupported so Migrate creates
+/// and tracks the column, and read/written through raw SQL in the retrieval
+/// service.
+///
+/// Dimension 384 matches the local model in `lib/embeddings.ts`
+/// (paraphrase-multilingual-MiniLM-L12-v2). Changing the embedding model means
+/// a migration and a full re-index, not a config change — the width is a
+/// property of the model, and a mismatch is rejected by Postgres rather than
+/// silently degrading.
+model DocumentChunk {
+  id         String @id @default(cuid(2))
+  documentId String
+
+  ordinal    Int
+  content    String @db.Text
+  tokenCount Int
+
+  // Denormalised so a retrieval hit can be attributed without a join, and so
+  // the transcript can cite a title and URL even after a re-crawl.
+  documentTitle String
+  sourceUrl     String?
+  heading       String?
+
+  embedding Unsupported("vector(384)")?
+
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+
+  document Document        @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  usedIn   MessageSource[]
+
+  @@unique([documentId, ordinal])
+  @@index([documentId])
+  @@map("document_chunk")
+}
+
+// ─── Operations ─────────────────────────────────────────────────────────────
+
+model Analytics {
+  id             String  @id @default(cuid(2))
+  conversationId String?
+
+  metric   String
+  value    Float
+  metadata Json?
+
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+
+  conversation Conversation? @relation(fields: [conversationId], references: [id], onDelete: SetNull)
+
+  @@index([metric, createdAt])
+  @@index([conversationId])
+  @@map("analytics")
+}
+
+model Setting {
+  key       String   @id
+  value     Json
+  updatedAt DateTime @updatedAt @db.Timestamptz(6)
+
+  @@map("setting")
+}
+
+/// Versioned system prompts. Editing from the admin panel writes a new version
+/// rather than mutating in place, because prompt caching depends on the prompt
+/// being prefix-stable and a bad edit needs to be revertible.
+model Prompt {
+  id       String  @id @default(cuid(2))
+  key      String
+  version  Int
+  name     String
+  content  String  @db.Text
+  isActive Boolean @default(false)
+
+  createdById String?
+  createdAt   DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt   DateTime @updatedAt @db.Timestamptz(6)
+
+  createdBy User? @relation(fields: [createdById], references: [id], onDelete: SetNull)
+
+  @@unique([key, version])
+  @@index([key, isActive])
+  @@map("prompt")
+}
+
+model AuditLog {
+  id          String  @id @default(cuid(2))
+  actorUserId String?
+
+  action   String
+  entity   String
+  entityId String?
+  metadata Json?
+
+  ipHash    String?
+  userAgent String?
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+
+  actor User? @relation(fields: [actorUserId], references: [id], onDelete: SetNull)
+
+  @@index([createdAt])
+  @@index([entity, entityId])
+  @@map("audit_log")
+}
