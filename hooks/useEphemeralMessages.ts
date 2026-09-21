@@ -9,6 +9,10 @@ const DWELL_MS = 7000;
  *  mid-flight and vanishes instead of leaving. */
 const EXIT_MS = 600;
 
+/** Timer key for the group exit on reset. Shares the timer map with the
+ *  per-caption timers so unmount cleanup cancels it too. */
+const RESET_TIMER = "__reset__";
+
 export interface EphemeralMessage {
   readonly message: TranscriptMessage;
   readonly leaving: boolean;
@@ -44,8 +48,15 @@ export function useEphemeralMessages(
   const scheduledRef = useRef<Set<string>>(new Set());
   const timersRef = useRef<Map<string, number>>(new Map());
   const pausedRef = useRef(false);
-  const messagesRef = useRef(messages);
-  messagesRef.current = messages;
+
+  /** Mirror of `rendered`, so the reset effect reads the current value without
+   *  taking it as a dependency and re-running on every mount it causes. */
+  const renderedRef = useRef<readonly string[]>([]);
+
+  /** Last-known content for everything currently on screen. A caption has to
+   *  survive its message being removed from the transcript for long enough to
+   *  animate out; pruned as captions unmount, so it stays bounded. */
+  const snapshotRef = useRef<Map<string, TranscriptMessage>>(new Map());
 
   const clearTimer = useCallback((id: string) => {
     const timer = timersRef.current.get(id);
@@ -112,15 +123,35 @@ export function useEphemeralMessages(
     }
   }, [messages, scheduleDwell]);
 
-  // A reset clears the transcript, so anything still on screen belongs to a
-  // conversation that no longer exists.
+  /**
+   * A reset — ending the conversation, or starting a new one — empties the
+   * transcript. Whatever is still on screen belongs to a conversation that no
+   * longer exists, so it goes; but it goes by *leaving*, using the same exit
+   * animation as an expiring caption. Dropping the whole column in one frame
+   * looks like a glitch rather than a clear.
+   *
+   * This is why `snapshotRef` exists. The content is resolved from `messages`
+   * normally, and `messages` is now empty — without a copy there would be
+   * nothing left to animate.
+   */
   useEffect(() => {
     if (messages.length > 0) return;
+
     for (const timer of timersRef.current.values()) window.clearTimeout(timer);
     timersRef.current.clear();
     scheduledRef.current.clear();
-    setRendered([]);
-    setLeaving([]);
+
+    const onScreen = renderedRef.current;
+    if (onScreen.length === 0) return;
+
+    setLeaving(onScreen);
+    const timer = window.setTimeout(() => {
+      setRendered([]);
+      setLeaving([]);
+      snapshotRef.current.clear();
+      timersRef.current.delete(RESET_TIMER);
+    }, EXIT_MS);
+    timersRef.current.set(RESET_TIMER, timer);
   }, [messages.length]);
 
   useEffect(
@@ -131,13 +162,23 @@ export function useEphemeralMessages(
     [],
   );
 
+  renderedRef.current = rendered;
+
   const byId = new Map(messages.map((m) => [m.id, m]));
   const leavingSet = new Set(leaving);
+  const renderedSet = new Set(rendered);
+
+  // Snapshot what is on screen, and forget what has left.
+  for (const [id, message] of byId) {
+    if (renderedSet.has(id)) snapshotRef.current.set(id, message);
+  }
+  for (const id of snapshotRef.current.keys()) {
+    if (!renderedSet.has(id)) snapshotRef.current.delete(id);
+  }
 
   const visible: EphemeralMessage[] = [];
   for (const id of rendered) {
-    const message = byId.get(id);
-    // Dropped from the transcript while still on screen — a reset mid-exit.
+    const message = byId.get(id) ?? snapshotRef.current.get(id);
     if (!message) continue;
     if (message.content.trim().length === 0 && message.status !== "streaming") {
       continue;

@@ -74,11 +74,19 @@ export function SessionLauncher() {
     await start();
   };
 
-  /** Writes the closing turn immediately rather than up to five seconds late.
-   *  The append route's grace window exists for exactly this call order. */
+  /**
+   * Order matters and is the whole point of this function.
+   *
+   * `stop()` closes the session, `flush()` writes the closing turn — awaited,
+   * because `reset()` empties the array the sync hook reads from and clearing
+   * first would strand the last turn unwritten. Only then is the screen
+   * cleared. The append route's grace window exists for exactly this sequence.
+   */
   const onStop = async (): Promise<void> => {
     await stop();
     await sync.flush();
+    transcript.reset();
+    knowledge.reset();
   };
 
   const isLive = connectionState === "connected";
